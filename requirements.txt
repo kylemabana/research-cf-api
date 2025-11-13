@@ -1,0 +1,14 @@
+flask
+pymysql
+mysql-connector-python
+pandas
+scikit-learn
+joblib
+pdfplumber
+pytesseract
+Pillow
+numpy
+opencv-python
+PyPDF2
+pdfminer.six
+

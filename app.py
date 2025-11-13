@@ -246,7 +246,44 @@ def search():
     top = df.nlargest(5, 'score')
     results = top[['title', 'college', 'program']].to_dict(orient='records')
     return jsonify(results)
+@app.route('/search', methods=['POST'])
+def search():
+    data = request.get_json(silent=True) or {}
+    query = data.get('query', '').strip()
+    if not query:
+        return jsonify([])
 
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT tc.title, tc.authorone, tc.authortwo, tc.authorthree,
+                       tc.colleges_id, p.program, c.colleges AS college
+                FROM thesis_capstone tc
+                JOIN thesis_submission ts USING(tc_id)
+                JOIN student_information si USING(student_id)
+                JOIN program p USING(program_id)
+                JOIN colleges c ON si.colleges_id = c.colleges_id
+                WHERE ts.status = 'Approved'
+            """)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return jsonify([])
+
+    df['text'] = df[['title','authorone','authortwo','authorthree']].fillna('').agg(' '.join, axis=1)
+
+    corpus_vec = vectorizer.transform(df['text'])
+    q_vec = vectorizer.transform([query])
+    scores = (corpus_vec @ q_vec.T).toarray().flatten()
+
+    df['score'] = scores
+    top = df.nlargest(5, 'score')
+    return jsonify(top[['title','college','program']].to_dict(orient='records'))
+    
 # ============================================================
 #  ENTRYPOINT
 # ============================================================

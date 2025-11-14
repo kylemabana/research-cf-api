@@ -13,8 +13,8 @@ app = Flask(__name__)
 # MySQL connection config (EDIT THIS)
 # ----------------------------
 db_config = {
-    'host': 'srv2051.hstgr.io',          # change to your DB host if needed
-    'user': 'u311577524_admin',               # change to your DB user
+    'host': 'srv2051.hstgr.io',            # change to your DB host if needed
+    'user': 'u311577524_admin',            # change to your DB user
     'password': 'Ej@0MZ#*9',               # change to your DB password
     'database': 'u311577524_research_db',
     'cursorclass': pymysql.cursors.DictCursor
@@ -56,7 +56,7 @@ def resolve_student_id(arg):
             try:
                 return int(df.iloc[0]["student_id"])
             except (ValueError, TypeError):
-                # kung may weird na value sa DB (e.g. "student_id"), wag mag-crash
+                # kung may weird na value sa DB (e.g. string "student_id"), wag mag-crash
                 return None
         return None
     finally:
@@ -95,7 +95,7 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                     ON tc.colleges_id = c.colleges_id
                 WHERE tc.program_id = %s
                 AND tc.colleges_id = %s
-                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
+                {("AND tc.tc_id NOT IN (" + ",".join(["%s"] * len(exclude_ids)) + ")") if exclude_ids else ""}
                 GROUP BY tc.tc_id
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
@@ -107,7 +107,7 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
             remaining -= len(df1)
 
         # Fallback 2: most read overall (Approved only)
-            if remaining > 0:
+        if remaining > 0:
             ex_ids = exclude_ids[:]
             for f in frames:
                 if not f.empty:
@@ -153,6 +153,7 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
         return pd.DataFrame()
     finally:
         conn.close()
+
 
 def compute_recommendations(student_arg):
     student_id = resolve_student_id(student_arg)
@@ -212,25 +213,25 @@ def compute_recommendations(student_arg):
         if candidate_ids:
             placeholders = ",".join(["%s"] * len(candidate_ids))
             recommend_query = f"""
-    SELECT tc.tc_id,
-           tc.title,
-           tc.authorone, tc.authortwo, tc.authorthree,
-           tc.authorfour, tc.authorfive,
-           tc.colleges_id, tc.program_id,
-           tc.academic_year, tc.project_type,
-           tc.views,
-           p.program,
-           c.colleges AS college,
-           ts.status
-    FROM thesis_capstone tc
-    INNER JOIN thesis_submission ts
-        ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-    LEFT JOIN program p
-        ON tc.program_id = p.program_id
-    LEFT JOIN colleges c
-        ON tc.colleges_id = c.colleges_id
-    WHERE tc.tc_id IN ({placeholders})
-"""
+                SELECT tc.tc_id,
+                    tc.title,
+                    tc.authorone, tc.authortwo, tc.authorthree,
+                    tc.authorfour, tc.authorfive,
+                    tc.colleges_id, tc.program_id,
+                    tc.academic_year, tc.project_type,
+                    tc.views,
+                    p.program,
+                    c.colleges AS college,
+                    ts.status
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts
+                    ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN program p
+                    ON tc.program_id = p.program_id
+                LEFT JOIN colleges c
+                    ON tc.colleges_id = c.colleges_id
+                WHERE tc.tc_id IN ({placeholders})
+            """
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
             if not recommend_df.empty:
                 rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
@@ -254,6 +255,7 @@ def compute_recommendations(student_arg):
     finally:
         conn.close()
 
+
 @app.route("/recommend")
 def recommend():
     student_arg = request.args.get("student_id", "").strip()
@@ -261,6 +263,7 @@ def recommend():
         return jsonify([])
     recs = compute_recommendations(student_arg)
     return jsonify(recs)
+
 
 # ============================================================
 #  SEARCH PART → /search endpoint

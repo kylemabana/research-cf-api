@@ -6,16 +6,35 @@ warnings.filterwarnings("ignore")
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 import mysql.connector
+import os
+import json
 
 # ----------------------------
 # DB connection helper
 # ----------------------------
 def get_conn():
+    # Read DB config from .dbconfig.json if present, else from environment, else fallbacks
+    cfg = {}
+    cfg_path = os.path.join(os.path.dirname(__file__), '.dbconfig.json')
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+
+    host = cfg.get('host') or os.environ.get('DB_HOST') or 'srv2051.hstgr.io'
+    user = cfg.get('user') or os.environ.get('DB_USER') or 'u311577524_admin'
+    password = cfg.get('password') or os.environ.get('DB_PASSWORD') or 'Ej@0MZ#*9'
+    database = cfg.get('database') or os.environ.get('DB_NAME') or 'u311577524_research_db'
+    port = int(cfg.get('port') or os.environ.get('DB_PORT') or 3306)
+
     return mysql.connector.connect(
-        host="srv2051.hstgr.io",
-        user="u311577524_admin",
-        password="Ej@0MZ#*9",
-        database="u311577524_research_db"
+        host=host,
+        user=user,
+        password=password,
+        database=database,
+        port=port
     )
 
 # ----------------------------
@@ -133,22 +152,20 @@ def main():
             print(fb.to_json(orient="records", force_ascii=False))
             return
 
-        # Build user-item matrix
-        user_item = reads_df.pivot_table(
-            index="student_id",
-            columns="tc_id",
-            aggfunc=lambda x: 1,
-            fill_value=0
-        )
+        # Build user-item matrix (rows=student_id, cols=tc_id) as binary counts
+        user_item = pd.crosstab(reads_df["student_id"].astype(int), reads_df["tc_id"].astype(int))
+        # Ensure indices/columns are integer types for reliable lookups later
+        user_item.index = user_item.index.astype(int)
+        user_item.columns = user_item.columns.astype(int)
 
         # If current user missing in matrix → fallback
-        if student_id not in user_item.index:
+        if int(student_id) not in user_item.index:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             print(fb.to_json(orient="records", force_ascii=False))
             return
 
         # Cosine similarity
-        sim = cosine_similarity(user_item)
+        sim = cosine_similarity(user_item.values)
         sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
         # Similar students (top 5 excluding self)
@@ -181,6 +198,7 @@ def main():
             """
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
             if not recommend_df.empty:
+                recommend_df["tc_id"] = recommend_df["tc_id"].astype(int)
                 rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
                 recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
                 recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])

@@ -1,97 +1,88 @@
-import mysql.connector
 from fastapi import FastAPI
-from typing import List, Dict
+from typing import List, Dict, Any
+import pymysql
 
 app = FastAPI()
 
+
 def get_db():
-    return mysql.connector.connect(
-        host="YOUR_DB_HOST",
-        user="YOUR_DB_USER",
-        password="YOUR_DB_PASS",
-        database="u311577524_research_db"
+    # 🔴 EDIT THESE CREDENTIALS TO MATCH YOUR DATABASE
+    return pymysql.connect(
+        host="srv2051.hstgr.io",
+        user="u311577524_admin",
+        password="Ej@0MZ#*9",
+        database="u311577524_research_db",
+        cursorclass=pymysql.cursors.DictCursor
     )
 
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+
 @app.get("/recommend")
-print(f"[DEBUG] recommend called with student_id={student_id}")
+def recommend(student_id: int) -> List[Dict[str, Any]]:
+    # ✅ No f-string; works even on older Python
+    print("[DEBUG] recommend called with student_id=%s" % student_id)
 
-cursor.execute(
-    "SELECT COUNT(*) AS cnt FROM student_reads WHERE student_id = %s",
-    (student_id,)
-)
-cnt = cursor.fetchone()["cnt"]
-print(f"[DEBUG] student_reads rows for {student_id}: {cnt}")
-
-def recommend(student_id: int) -> List[Dict]:
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    
+    cursor = conn.cursor()
 
-    # 1) Get student's program + college
-    cursor.execute("""
-        SELECT program_id, colleges_id
-        FROM student_information
-        WHERE student_id = %s
-        LIMIT 1
-    """, (student_id,))
-    student = cursor.fetchone()
-
-    if not student:
-        # If student doesn't exist → just return trending
-        return get_trending(cursor)
-
-    program_id = student["program_id"]
-    colleges_id = student["colleges_id"]
-
-    # 2) Get tc_ids the student already read
+    # 1) Get the tc_ids the student has already read
     cursor.execute("""
         SELECT DISTINCT tc_id
         FROM student_reads
         WHERE student_id = %s
     """, (student_id,))
-    already_read_ids = [row["tc_id"] for row in cursor.fetchall()]
+    read_rows = cursor.fetchall()
+    read_ids = [row["tc_id"] for row in read_rows]
 
-    # 3) Recommend theses in same program/college, not archived, not already read
-    if already_read_ids:
-        placeholders = ",".join(["%s"] * len(already_read_ids))
-        cursor.execute(f"""
-            SELECT tc.tc_id, tc.title, tc.views, tc.colleges_id, tc.program_id
+    print("[DEBUG] student_reads rows for %s = %s" % (student_id, len(read_ids)))
+
+    recs: List[Dict[str, Any]] = []
+
+    # 2) If they have read something, recommend other theses
+    if read_ids:
+        placeholders = ",".join(["%s"] * len(read_ids))
+        sql = """
+            SELECT
+                tc.tc_id,
+                tc.title,
+                tc.views,
+                tc.colleges_id,
+                tc.program_id,
+                tc.abstract
             FROM thesis_capstone tc
             WHERE tc.is_archived = 0
-              AND tc.program_id = %s
-              AND tc.colleges_id = %s
-              AND tc.tc_id NOT IN ({placeholders})
+              AND tc.tc_id NOT IN ({})
             ORDER BY tc.views DESC
             LIMIT 12
-        """, (program_id, colleges_id, *already_read_ids))
-    else:
-        cursor.execute("""
-            SELECT tc.tc_id, tc.title, tc.views, tc.colleges_id, tc.program_id
-            FROM thesis_capstone tc
-            WHERE tc.is_archived = 0
-              AND tc.program_id = %s
-              AND tc.colleges_id = %s
-            ORDER BY tc.views DESC
-            LIMIT 12
-        """, (program_id, colleges_id))
+        """.format(placeholders)
 
-    recs = cursor.fetchall()
+        cursor.execute(sql, read_ids)
+        recs = cursor.fetchall()
 
-    # 4) If still empty, backend fallback → trending
+    # 3) If still no recs, fallback to trending (top viewed)
     if not recs:
-        recs = get_trending(cursor)
+        print("[DEBUG] no CF recs, falling back to trending")
+        cursor.execute("""
+            SELECT
+                tc.tc_id,
+                tc.title,
+                tc.views,
+                tc.colleges_id,
+                tc.program_id,
+                tc.abstract
+            FROM thesis_capstone tc
+            WHERE tc.is_archived = 0
+            ORDER BY tc.views DESC
+            LIMIT 12
+        """)
+        recs = cursor.fetchall()
 
     cursor.close()
     conn.close()
+
+    print("[DEBUG] returning %s recommendations for student_id=%s" % (len(recs), student_id))
     return recs
-
-def get_trending(cursor):
-    cursor.execute("""
-        SELECT tc.tc_id, tc.title, tc.views, tc.colleges_id, tc.program_id
-        FROM thesis_capstone tc
-        WHERE tc.is_archived = 0
-        ORDER BY tc.views DESC
-        LIMIT 12
-    """)
-    return cursor.fetchall()
-

@@ -118,31 +118,31 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                 where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
 
            q2 = f"""
-    SELECT tc.tc_id,
-           tc.title,
-           tc.authorone, tc.authortwo, tc.authorthree,
-           tc.authorfour, tc.authorfive,
-           tc.colleges_id, tc.program_id,
-           tc.academic_year, tc.project_type,
-           tc.views,
-           p.program,
-           c.colleges AS college,
-           ts.status,
-           COUNT(sr.read_id) AS read_count
-    FROM thesis_capstone tc
-    INNER JOIN thesis_submission ts
-        ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-    LEFT JOIN student_reads sr
-        ON sr.tc_id = tc.tc_id
-    LEFT JOIN program p
-        ON tc.program_id = p.program_id
-    LEFT JOIN colleges c
-        ON tc.colleges_id = c.colleges_id
-    {where_clause}
-    GROUP BY tc.tc_id
-    ORDER BY read_count DESC, tc.tc_id DESC
-    LIMIT %s
-"""
+                    SELECT tc.tc_id,
+                        tc.title,
+                        tc.authorone, tc.authortwo, tc.authorthree,
+                        tc.authorfour, tc.authorfive,
+                        tc.colleges_id, tc.program_id,
+                        tc.academic_year, tc.project_type,
+                        tc.views,
+                        p.program,
+                        c.colleges AS college,
+                        ts.status,
+                        COUNT(sr.read_id) AS read_count
+                    FROM thesis_capstone tc
+                    INNER JOIN thesis_submission ts
+                        ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                    LEFT JOIN student_reads sr
+                        ON sr.tc_id = tc.tc_id
+                    LEFT JOIN program p
+                        ON tc.program_id = p.program_id
+                    LEFT JOIN colleges c
+                        ON tc.colleges_id = c.colleges_id
+                    {where_clause}
+                    GROUP BY tc.tc_id
+                    ORDER BY read_count DESC, tc.tc_id DESC
+                    LIMIT %s
+                """
             params2 = (ex_ids if ex_ids else []) + [remaining]
             df2 = pd.read_sql(q2, conn, params=params2)
             frames.append(df2)

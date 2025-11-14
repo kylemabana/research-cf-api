@@ -23,6 +23,94 @@ db_config = {
 def get_conn():
     return pymysql.connect(**db_config)
 
+
+def drop_header_like_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove rows na mukhang header (e.g. title='title', authorone='authorone', etc.).
+    """
+    if df is None or df.empty:
+        return df
+
+    cols = list(df.columns)
+
+    def is_header_row(row):
+        matches = 0
+        for col in cols:
+            val = row.get(col)
+            if isinstance(val, str) and val.strip().lower() == col.strip().lower():
+                matches += 1
+        # kung maraming columns ang eksaktong kapangalan ng column, mukhang header
+        return matches >= 2
+
+    mask = df.apply(is_header_row, axis=1)
+    # baliktarin: keep rows na HINDI header
+    cleaned = df[~mask].copy()
+    return cleaned
+
+def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
+    exclude_ids = exclude_ids or []
+    conn = get_conn()
+    try:
+        frames = []
+        remaining = limit
+
+        # Fallback 1: most read with same program & college (Approved only)
+        if program_id and college_id and remaining > 0:
+            q1 = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
+                WHERE tc.program_id = %s AND tc.colleges_id = %s
+                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
+                GROUP BY tc.tc_id
+                ORDER BY read_count DESC, tc.tc_id DESC
+                LIMIT %s
+            """
+            params = [program_id, college_id] + (exclude_ids if exclude_ids else []) + [remaining]
+            df1 = pd.read_sql(q1, conn, params=params)
+            df1 = drop_header_like_rows(df1)   # ← dito natin nililinis
+            frames.append(df1)
+            remaining -= len(df1)
+
+        # Fallback 2: most read overall (Approved only)
+        if remaining > 0:
+            ex_ids = exclude_ids[:]
+            for f in frames:
+                if not f.empty:
+                    ex_ids += f["tc_id"].tolist()
+
+            where_clause = ""
+            if ex_ids:
+                where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
+
+            q2 = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
+                {where_clause}
+                GROUP BY tc.tc_id
+                ORDER BY read_count DESC, tc.tc_id DESC
+                LIMIT %s
+            """
+            params2 = (ex_ids if ex_ids else []) + [remaining]
+            df2 = pd.read_sql(q2, conn, params=params2)
+            df2 = drop_header_like_rows(df2)   # ← linis ulit
+            frames.append(df2)
+
+        if frames:
+            out = pd.concat(frames, ignore_index=True)
+            out = drop_header_like_rows(out)   # final clean, just in case
+            return out
+
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+
 # ----------------------------
 # Load vectorizer / model for /search
 # ----------------------------
@@ -198,7 +286,6 @@ def compute_recommendations(student_arg):
     if rec_df.empty or len(rec_df) < 4:
         remaining = 4 - len(rec_df)
         extra_exclude = rec_df["tc_id"].tolist() if not rec_df.empty else []
-        # ayaw mong ma-recommend ulit yung kakakuha lang sa rec_df
         extra_exclude = list(set(extra_exclude + exclude_ids))
         fb = fallback_recos(
             exclude_ids=extra_exclude,
@@ -206,6 +293,9 @@ def compute_recommendations(student_arg):
         )
         if not fb.empty:
             rec_df = pd.concat([rec_df, fb], ignore_index=True)
+
+    # FINAL SAFETY: alisin lahat ng mukhang header rows
+    rec_df = drop_header_like_rows(rec_df)
 
     return rec_df.to_dict(orient="records")
 
@@ -276,5 +366,6 @@ if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
 
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
 

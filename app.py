@@ -10,12 +10,12 @@ import joblib
 app = Flask(__name__)
 
 # ----------------------------
-# MySQL connection config
+# MySQL connection config (EDIT THIS)
 # ----------------------------
 db_config = {
-    'host': 'srv2051.hstgr.io',
-    'user': 'u311577524_admin',
-    'password': 'Ej@0MZ#*9',
+    'host': 'srv2051.hstgr.io',          # change to your DB host if needed
+    'user': 'u311577524_admin',               # change to your DB user
+    'password': 'Ej@0MZ#*9',               # change to your DB password
     'database': 'u311577524_research_db',
     'cursorclass': pymysql.cursors.DictCursor
 }
@@ -26,26 +26,19 @@ def get_conn():
 # ----------------------------
 # Load vectorizer / model for /search
 # ----------------------------
-# NOTE: kung ito ang nagka-cause ng error dahil wala pang pkl files,
-# pwede mo muna i-comment out itong dalawang lines:
 vectorizer = joblib.load('vectorizer.pkl')
-model = joblib.load('model.pkl')  # optional lang, not used directly
+# If you don't actually use model, you can delete this line
+model = joblib.load('model.pkl')
 
 # ============================================================
-#  COLLABORATIVE FILTERING HELPERS
+#  CF PART (from recommend_cf.py) → /recommend endpoint
 # ============================================================
 
 def resolve_student_id(arg):
     raw = (arg or "").strip()
-
-    # Case 1: numeric student_id (e.g. 15)
     if raw.isdigit():
-        try:
-            return int(raw)
-        except ValueError:
-            return None
+        return int(raw)
 
-    # Case 2: treat as student_number (e.g. "22-00677")
     conn = get_conn()
     try:
         df = pd.read_sql(
@@ -54,14 +47,10 @@ def resolve_student_id(arg):
             params=[raw]
         )
         if not df.empty:
-            try:
-                return int(df.iloc[0]["student_id"])
-            except (ValueError, TypeError):
-                return None
+            return int(df.iloc[0]["student_id"])
         return None
     finally:
         conn.close()
-
 
 def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
     exclude_ids = exclude_ids or []
@@ -70,32 +59,16 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
         frames = []
         remaining = limit
 
-        # Fallback 1: most read within same program & college (Approved only)
+        # Fallback 1: most read with same program & college (Approved only)
         if program_id and college_id and remaining > 0:
             q1 = f"""
-                SELECT tc.tc_id,
-                    tc.title,
-                    tc.authorone, tc.authortwo, tc.authorthree,
-                    tc.authorfour, tc.authorfive,
-                    tc.colleges_id, tc.program_id,
-                    tc.academic_year, tc.project_type,
-                    tc.views,
-                    p.program,
-                    c.colleges AS college,
-                    ts.status,
-                    COUNT(sr.read_id) AS read_count
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
                 FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts
-                    ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr
-                    ON sr.tc_id = tc.tc_id
-                LEFT JOIN program p
-                    ON tc.program_id = p.program_id
-                LEFT JOIN colleges c
-                    ON tc.colleges_id = c.colleges_id
-                WHERE tc.program_id = %s
-                AND tc.colleges_id = %s
-                {("AND tc.tc_id NOT IN (" + ",".join(["%s"] * len(exclude_ids)) + ")") if exclude_ids else ""}
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
+                WHERE tc.program_id = %s AND tc.colleges_id = %s
+                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
                 GROUP BY tc.tc_id
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
@@ -117,26 +90,11 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                 where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
 
             q2 = f"""
-                SELECT tc.tc_id,
-                    tc.title,
-                    tc.authorone, tc.authortwo, tc.authorthree,
-                    tc.authorfour, tc.authorfive,
-                    tc.colleges_id, tc.program_id,
-                    tc.academic_year, tc.project_type,
-                    tc.views,
-                    p.program,
-                    c.colleges AS college,
-                    ts.status,
-                    COUNT(sr.read_id) AS read_count
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
                 FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts
-                    ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr
-                    ON sr.tc_id = tc.tc_id
-                LEFT JOIN program p
-                    ON tc.program_id = p.program_id
-                LEFT JOIN colleges c
-                    ON tc.colleges_id = c.colleges_id
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
                 {where_clause}
                 GROUP BY tc.tc_id
                 ORDER BY read_count DESC, tc.tc_id DESC
@@ -151,7 +109,6 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
         return pd.DataFrame()
     finally:
         conn.close()
-
 
 def compute_recommendations(student_arg):
     student_id = resolve_student_id(student_arg)
@@ -172,12 +129,10 @@ def compute_recommendations(student_arg):
         program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
         college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
 
-        # No reads at all → fallback
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        # User-item matrix
         user_item = reads_df.pivot_table(
             index="student_id",
             columns="tc_id",
@@ -185,18 +140,16 @@ def compute_recommendations(student_arg):
             fill_value=0
         )
 
-        # If this user has no reads in matrix → fallback
         if student_id not in user_item.index:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        # Cosine similarity across users
         sim = cosine_similarity(user_item)
         sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
         similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
-        current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
 
+        current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
         recommend_df = pd.DataFrame()
         candidate_ids = []
 
@@ -215,23 +168,10 @@ def compute_recommendations(student_arg):
         if candidate_ids:
             placeholders = ",".join(["%s"] * len(candidate_ids))
             recommend_query = f"""
-                SELECT tc.tc_id,
-                    tc.title,
-                    tc.authorone, tc.authortwo, tc.authorthree,
-                    tc.authorfour, tc.authorfive,
-                    tc.colleges_id, tc.program_id,
-                    tc.academic_year, tc.project_type,
-                    tc.views,
-                    p.program,
-                    c.colleges AS college,
-                    ts.status
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo,
+                       tc.colleges_id, tc.program_id, tc.academic_year, tc.project_type
                 FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts
-                    ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN program p
-                    ON tc.program_id = p.program_id
-                LEFT JOIN colleges c
-                    ON tc.colleges_id = c.colleges_id
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
                 WHERE tc.tc_id IN ({placeholders})
             """
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
@@ -241,7 +181,6 @@ def compute_recommendations(student_arg):
                 recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])
                 recommend_df = recommend_df.head(4)
 
-        # Fill up with fallback if kulang pa sa 4
         if len(recommend_df) < 4:
             remaining = 4 - len(recommend_df)
             exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
@@ -258,10 +197,6 @@ def compute_recommendations(student_arg):
     finally:
         conn.close()
 
-# ============================================================
-#  ROUTES
-# ============================================================
-
 @app.route("/recommend")
 def recommend():
     student_arg = request.args.get("student_id", "").strip()
@@ -270,41 +205,10 @@ def recommend():
     recs = compute_recommendations(student_arg)
     return jsonify(recs)
 
-
-@app.route("/db-test")
-def db_test():
-    """
-    Simple DB connectivity + row count check
-    """
-    try:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT COUNT(*) AS student_information_rows FROM student_information")
-                info = cursor.fetchone()
-
-                cursor.execute("SELECT COUNT(*) AS thesis_capstone_rows FROM thesis_capstone")
-                thesis = cursor.fetchone()
-
-                cursor.execute("SELECT COUNT(*) AS student_reads_rows FROM student_reads")
-                reads = cursor.fetchone()
-
-            return jsonify({
-                "ok": True,
-                "student_information_rows": info["student_information_rows"],
-                "thesis_capstone_rows": thesis["thesis_capstone_rows"],
-                "student_reads_rows": reads["student_reads_rows"]
-            })
-        finally:
-            conn.close()
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route("/search", methods=['POST'])
+# ============================================================
+#  SEARCH PART → /search endpoint
+# ============================================================
+@app.route('/search', methods=['POST'])
 def search():
     data = request.get_json(silent=True) or {}
     query = data.get('query', '').strip()
@@ -340,11 +244,12 @@ def search():
 
     df['score'] = scores
     top = df.nlargest(5, 'score')
-    return jsonify(top[['title', 'college', 'program']].to_dict(orient='records'))
-
+    results = top[['title', 'college', 'program']].to_dict(orient='records')
+    return jsonify(results)
 
 # ============================================================
 #  ENTRYPOINT
 # ============================================================
 if __name__ == '__main__':
+    # When deploying on a platform, you might not want debug=True
     app.run(host="0.0.0.0", port=8000, debug=True)

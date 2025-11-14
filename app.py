@@ -328,9 +328,9 @@ def recommend():
     """
     # primary: student_number, fallback: student_id or generic 'student'
     student_arg = (
-        request.args.get("student_number", "").strip()
+        request.args.get("student_id", "").strip()
         or request.args.get("student", "").strip()
-        or request.args.get("student_id", "").strip()
+        or request.args.get("student_number", "").strip()
     )
 
     if not student_arg:
@@ -398,5 +398,6 @@ def search():
 # ============================================================
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
+
 
     app.run(host="0.0.0.0", port=8000, debug=True)

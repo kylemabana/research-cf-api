@@ -1,272 +1,255 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 from flask import Flask, request, jsonify
 import pymysql
 import pandas as pd
-import traceback
+from sklearn.metrics.pairwise import cosine_similarity
 import joblib
 
 app = Flask(__name__)
 
-# ---------- DB CONFIG ----------
+# ----------------------------
+# MySQL connection config (EDIT THIS)
+# ----------------------------
 db_config = {
-    'host': 'srv2051.hstgr.io',
-    'user': 'u311577524_admin',
-    'password': 'Ej@0MZ#*9',
+    'host': 'srv2051.hstgr.io',          # change to your DB host if needed
+    'user': 'u311577524_admin',               # change to your DB user
+    'password': 'Ej@0MZ#*9',               # change to your DB password
     'database': 'u311577524_research_db',
     'cursorclass': pymysql.cursors.DictCursor
 }
 
-print("\n=== APP STARTING ===")
-print("Trying to load model files...")
+def get_conn():
+    return pymysql.connect(**db_config)
 
-try:
-    vectorizer = joblib.load('vectorizer.pkl')
-    model = joblib.load('model.pkl')
-    print("Model files loaded successfully!")
-except Exception as e:
-    print("ERROR loading model files!")
-    print(e)
-    print(traceback.format_exc())
+# ----------------------------
+# Load vectorizer / model for /search
+# ----------------------------
+vectorizer = joblib.load('vectorizer.pkl')
+# If you don't actually use model, you can delete this line
+model = joblib.load('model.pkl')
 
-print("=== STARTUP COMPLETE ===\n")
+# ============================================================
+#  CF PART (from recommend_cf.py) → /recommend endpoint
+# ============================================================
 
+def resolve_student_id(arg):
+    raw = (arg or "").strip()
+    if raw.isdigit():
+        return int(raw)
 
-# ---------- HELPER: DB CONNECTION TEST ----------
-def get_connection():
+    conn = get_conn()
     try:
-        conn = pymysql.connect(**db_config)
-        print("[DB] Connection OK")
-        return conn
-    except Exception as e:
-        print("[DB] CONNECTION ERROR:")
-        print(e)
-        print(traceback.format_exc())
+        df = pd.read_sql(
+            "SELECT student_id FROM student_information WHERE student_number = %s LIMIT 1",
+            conn,
+            params=[raw]
+        )
+        if not df.empty:
+            return int(df.iloc[0]["student_id"])
         return None
-
-
-# ---------- RESOLVE STUDENT ----------
-def resolve_student_id(raw):
-    try:
-        if raw.isdigit():
-            print(f"[resolve_student_id] Using numeric student_id={raw}")
-            return int(raw)
-
-        print(f"[resolve_student_id] Searching student_number='{raw}'")
-
-        conn = get_connection()
-        if not conn:
-            return None
-
-        query = """
-        SELECT student_id
-        FROM student_information
-        WHERE student_number = %s AND student_id <> 0
-        ORDER BY student_id DESC
-        LIMIT 1
-        """
-        df = pd.read_sql(query, conn, params=[raw])
+    finally:
         conn.close()
 
-        print("[resolve_student_id] Query result:")
-        print(df.head())
-
-        if df.empty:
-            print("[resolve_student_id] No match found!")
-            return None
-
-        return int(df.iloc[0]['student_id'])
-
-    except Exception as e:
-        print("[resolve_student_id] ERROR!")
-        print(e)
-        print(traceback.format_exc())
-        return None
-
-
-# ---------- FALLBACK RECOS ----------
-def fallback_recos(limit=4):
-    print("[fallback_recos] Fetching fallback recommendations...")
-
+def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
+    exclude_ids = exclude_ids or []
+    conn = get_conn()
     try:
-        conn = get_connection()
-        if not conn:
-            return pd.DataFrame()
+        frames = []
+        remaining = limit
 
-        query = """
-        SELECT tc_id, title, authorone, authortwo,
-               colleges_id, program_id, academic_year,
-               project_type, views AS read_count
-        FROM thesis_capstone
-        ORDER BY views DESC
-        LIMIT %s
-        """
-        df = pd.read_sql(query, conn, params=[limit])
-        conn.close()
+        # Fallback 1: most read with same program & college (Approved only)
+        if program_id and college_id and remaining > 0:
+            q1 = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
+                WHERE tc.program_id = %s AND tc.colleges_id = %s
+                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
+                GROUP BY tc.tc_id
+                ORDER BY read_count DESC, tc.tc_id DESC
+                LIMIT %s
+            """
+            params = [program_id, college_id] + (exclude_ids if exclude_ids else []) + [remaining]
+            df1 = pd.read_sql(q1, conn, params=params)
+            frames.append(df1)
+            remaining -= len(df1)
 
-        print("[fallback_recos] Data:")
-        print(df.head())
+        # Fallback 2: most read overall (Approved only)
+        if remaining > 0:
+            ex_ids = exclude_ids[:]
+            for f in frames:
+                if not f.empty:
+                    ex_ids += f["tc_id"].tolist()
 
-        return df
+            where_clause = ""
+            if ex_ids:
+                where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
 
-    except Exception as e:
-        print("[fallback_recos] ERROR!")
-        print(e)
-        print(traceback.format_exc())
+            q2 = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
+                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
+                {where_clause}
+                GROUP BY tc.tc_id
+                ORDER BY read_count DESC, tc.tc_id DESC
+                LIMIT %s
+            """
+            params2 = (ex_ids if ex_ids else []) + [remaining]
+            df2 = pd.read_sql(q2, conn, params=params2)
+            frames.append(df2)
+
+        if frames:
+            return pd.concat(frames, ignore_index=True)
         return pd.DataFrame()
+    finally:
+        conn.close()
 
-
-# ---------- COLLAB FILTER CORE ----------
 def compute_recommendations(student_arg):
-    print("\n====== CF START ======")
-
     student_id = resolve_student_id(student_arg)
-    print(f"[CF] Resolved student_id = {student_id}")
 
-    if student_id is None:
-        print("[CF] No student found → using fallback only.")
+    # If cannot resolve → global popular/approved
+    if not student_id:
         fb = fallback_recos(limit=4)
         return fb.to_dict(orient="records")
 
+    conn = get_conn()
     try:
-        conn = get_connection()
-        if not conn:
-            print("[CF] Cannot connect to DB → fallback")
-            return fallback_recos(limit=4).to_dict(orient="records")
+        reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
+        prog_col_df = pd.read_sql(
+            "SELECT program_id, colleges_id FROM student_information WHERE student_id = %s LIMIT 1",
+            conn,
+            params=[student_id]
+        )
+        program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
+        college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
 
-        # Load student_reads
-        query_reads = """
-        SELECT student_id, tc_id
-        FROM student_reads
-        """
-        reads = pd.read_sql(query_reads, conn)
-        print("[CF] student_reads:")
-        print(reads.head())
-
-        if reads.empty:
-            print("[CF] No reads table data → fallback")
-            conn.close()
-            return fallback_recos(limit=4).to_dict(orient="records")
-
-        # Load approved theses for filtering
-        q_approved = """
-        SELECT ts.tc_id
-        FROM thesis_submission ts
-        WHERE ts.status = 'Approved'
-        """
-        approved = pd.read_sql(q_approved, conn)
-        print("[CF] approved tc_id:")
-        print(approved.head())
-
-        conn.close()
-
-        # ----- CF LOGIC -----
-
-        # Build user-item matrix
-        matrix = reads.pivot_table(index="student_id",
-                                   columns="tc_id",
-                                   aggfunc=len,
-                                   fill_value=0)
-
-        print("[CF] User-item matrix sample:")
-        print(matrix.head())
-
-        if student_id not in matrix.index:
-            print("[CF] Student has no reads → fallback")
-            fb = fallback_recos(limit=4)
+        if reads_df.empty:
+            fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        # Compute similarity using dot product
-        target = matrix.loc[student_id]
-        similarity = matrix.dot(target)
-
-        print("[CF] Similarity Series:")
-        print(similarity.head())
-
-        # Remove self
-        similarity = similarity.drop(student_id)
-
-        # Pick top 4 similar users
-        top_users = similarity.sort_values(ascending=False).head(4).index.tolist()
-        print(f"[CF] Top similar users: {top_users}")
-
-        # Get the theses they read
-        recommended_ids = set(
-            reads[reads['student_id'].isin(top_users)]['tc_id'].tolist()
+        user_item = reads_df.pivot_table(
+            index="student_id",
+            columns="tc_id",
+            aggfunc=lambda x: 1,
+            fill_value=0
         )
 
-        print(f"[CF] Raw recommended tc_id = {recommended_ids}")
-
-        if not recommended_ids:
-            print("[CF] No similar-user items → fallback")
-            fb = fallback_recos(limit=4)
+        if student_id not in user_item.index:
+            fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        # Filter approved
-        approved_set = set(approved['tc_id'].tolist())
-        recommended_ids = recommended_ids & approved_set
+        sim = cosine_similarity(user_item)
+        sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
-        print(f"[CF] Approved filtered tc_id = {recommended_ids}")
+        similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
 
-        if not recommended_ids:
-            print("[CF] None approved → fallback")
-            fb = fallback_recos(limit=4)
-            return fb.to_dict(orient="records")
+        current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
+        recommend_df = pd.DataFrame()
+        candidate_ids = []
 
-        # Finally pull their metadata
-        conn = get_connection()
-        query_meta = """
-        SELECT tc_id, title, authorone, authortwo,
-               colleges_id, program_id, academic_year,
-               project_type,
-               (SELECT COUNT(*) FROM student_reads WHERE tc_id = t.tc_id) AS read_count
-        FROM thesis_capstone t
-        WHERE tc_id IN (%s)
-        """ % ",".join(["%s"] * len(recommended_ids))
+        if similar_students:
+            similar_reads = reads_df[reads_df["student_id"].isin(similar_students)]
+            candidate_counts = (
+                similar_reads.groupby("tc_id")["student_id"]
+                .nunique()
+                .sort_values(ascending=False)
+            )
+            candidate_ids = [
+                int(tc) for tc in candidate_counts.index
+                if tc not in current_items
+            ]
 
-        details = pd.read_sql(query_meta, conn, params=list(recommended_ids))
+        if candidate_ids:
+            placeholders = ",".join(["%s"] * len(candidate_ids))
+            recommend_query = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo,
+                       tc.colleges_id, tc.program_id, tc.academic_year, tc.project_type
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                WHERE tc.tc_id IN ({placeholders})
+            """
+            recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
+            if not recommend_df.empty:
+                rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
+                recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
+                recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])
+                recommend_df = recommend_df.head(4)
+
+        if len(recommend_df) < 4:
+            remaining = 4 - len(recommend_df)
+            exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
+            fb = fallback_recos(
+                program_id=program_id,
+                college_id=college_id,
+                exclude_ids=exclude_ids,
+                limit=remaining
+            )
+            if not fb.empty:
+                recommend_df = pd.concat([recommend_df, fb], ignore_index=True)
+
+        return recommend_df.to_dict(orient="records")
+    finally:
         conn.close()
 
-        print("[CF] Final metadata:")
-        print(details.head())
-
-        # If still empty
-        if details.empty:
-            print("[CF] Metadata empty → fallback")
-            fb = fallback_recos(limit=4)
-            return fb.to_dict(orient="records")
-
-        # Limit to 4
-        final_df = details.head(4)
-        print("[CF] FINAL OUTPUT:")
-        print(final_df)
-
-        return final_df.to_dict(orient="records")
-
-    except Exception as e:
-        print("[CF] ERROR during calculation!")
-        print(e)
-        print(traceback.format_exc())
-
-        fb = fallback_recos(limit=4)
-        return fb.to_dict(orient="records")
-
-
-# ---------- API ENDPOINT ----------
 @app.route("/recommend")
 def recommend():
-    print("\n=== /recommend HIT ===")
     student_arg = request.args.get("student_id", "").strip()
-
-    print(f"[API] student_id param = '{student_arg}'")
-
+    if not student_arg:
+        return jsonify([])
     recs = compute_recommendations(student_arg)
-
-    print("[API] FINAL JSON RESPONSE:")
-    print(recs)
-
     return jsonify(recs)
 
+# ============================================================
+#  SEARCH PART → /search endpoint
+# ============================================================
+@app.route('/search', methods=['POST'])
+def search():
+    data = request.get_json(silent=True) or {}
+    query = data.get('query', '').strip()
+    if not query:
+        return jsonify([])
 
-@app.route("/")
-def home():
-    return jsonify({"msg": "CF API running"})
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT tc.title, tc.authorone, tc.authortwo, tc.authorthree,
+                       tc.colleges_id, p.program, c.colleges AS college
+                FROM thesis_capstone tc
+                JOIN thesis_submission ts USING(tc_id)
+                JOIN student_information si USING(student_id)
+                JOIN program p USING(program_id)
+                JOIN colleges c ON si.colleges_id = c.colleges_id
+                WHERE ts.status = 'Approved'
+            """)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
 
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return jsonify([])
+
+    df['text'] = df[['title', 'authorone', 'authortwo', 'authorthree']].fillna('').agg(' '.join, axis=1)
+
+    corpus_vec = vectorizer.transform(df['text'])
+    q_vec = vectorizer.transform([query])
+    scores = (corpus_vec @ q_vec.T).toarray().flatten()
+
+    df['score'] = scores
+    top = df.nlargest(5, 'score')
+    results = top[['title', 'college', 'program']].to_dict(orient='records')
+    return jsonify(results)
+
+# ============================================================
+#  ENTRYPOINT
+# ============================================================
+if __name__ == '__main__':
+    # When deploying on a platform, you might not want debug=True
+    app.run(host="0.0.0.0", port=8000, debug=True)

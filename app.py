@@ -13,14 +13,15 @@ app = Flask(__name__)
 # MySQL connection config (EDIT THIS)
 # ----------------------------
 db_config = {
-    'host': 'srv2051.hstgr.io',          # change to your DB host if needed
-    'user': 'u311577524_admin',               # change to your DB user
+    'host': 'srv2051.hstgr.io',            # change to your DB host if needed
+    'user': 'u311577524_admin',            # change to your DB user
     'password': 'Ej@0MZ#*9',               # change to your DB password
     'database': 'u311577524_research_db',
     'cursorclass': pymysql.cursors.DictCursor
 }
 
 def get_conn():
+    """Establishes a MySQL connection using pymysql."""
     return pymysql.connect(**db_config)
 
 
@@ -47,81 +48,28 @@ def drop_header_like_rows(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = df[~mask].copy()
     return cleaned
 
-def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
-    exclude_ids = exclude_ids or []
-    conn = get_conn()
-    try:
-        frames = []
-        remaining = limit
-
-        # Fallback 1: most read with same program & college (Approved only)
-        if program_id and college_id and remaining > 0:
-            q1 = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
-                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
-                FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
-                WHERE tc.program_id = %s AND tc.colleges_id = %s
-                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
-                GROUP BY tc.tc_id
-                ORDER BY read_count DESC, tc.tc_id DESC
-                LIMIT %s
-            """
-            params = [program_id, college_id] + (exclude_ids if exclude_ids else []) + [remaining]
-            df1 = pd.read_sql(q1, conn, params=params)
-            df1 = drop_header_like_rows(df1)   # ← dito natin nililinis
-            frames.append(df1)
-            remaining -= len(df1)
-
-        # Fallback 2: most read overall (Approved only)
-        if remaining > 0:
-            ex_ids = exclude_ids[:]
-            for f in frames:
-                if not f.empty:
-                    ex_ids += f["tc_id"].tolist()
-
-            where_clause = ""
-            if ex_ids:
-                where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
-
-            q2 = f"""
-                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
-                       tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
-                FROM thesis_capstone tc
-                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
-                LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
-                {where_clause}
-                GROUP BY tc.tc_id
-                ORDER BY read_count DESC, tc.tc_id DESC
-                LIMIT %s
-            """
-            params2 = (ex_ids if ex_ids else []) + [remaining]
-            df2 = pd.read_sql(q2, conn, params=params2)
-            df2 = drop_header_like_rows(df2)   # ← linis ulit
-            frames.append(df2)
-
-        if frames:
-            out = pd.concat(frames, ignore_index=True)
-            out = drop_header_like_rows(out)   # final clean, just in case
-            return out
-
-        return pd.DataFrame()
-    finally:
-        conn.close()
-
 
 # ----------------------------
 # Load vectorizer / model for /search
 # ----------------------------
-vectorizer = joblib.load('vectorizer.pkl')
-# If you don't actually use model, you can delete this line
-model = joblib.load('model.pkl')
+try:
+    vectorizer = joblib.load('vectorizer.pkl')
+    # If you don't actually use model, you can delete this line
+    model = joblib.load('model.pkl')
+except FileNotFoundError:
+    # Handle case where pkl files are missing (e.g., development environment)
+    print("Warning: vectorizer.pkl or model.pkl not found. Search functionality will fail.")
+    vectorizer = None
+    model = None
+
 
 # ============================================================
-#  CF PART (from recommend_cf.py) → /recommend endpoint
+#  CF PART (from recommend_cf.py) → /recommend endpoint
 # ============================================================
 def resolve_student_id(arg):
+    """
+    Resolves student ID from either numeric student_id or student_number.
+    """
     raw = (arg or "").strip()
 
     conn = get_conn()
@@ -155,11 +103,17 @@ def resolve_student_id(arg):
             # lahat ng nakuha ay hindi valid na number (hal. 'student_id')
             return None
 
+        # Take the first resolved ID
         return int(df.iloc[0]["student_id"])
     finally:
         conn.close()
 
+
 def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
+    """
+    Generates fallback recommendations based on popularity (most read) among approved theses.
+    Prioritizes same college/program, then global popularity.
+    """
     exclude_ids = exclude_ids or []
     conn = get_conn()
     try:
@@ -168,6 +122,10 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
 
         # Fallback 1: most read with same program & college (Approved only)
         if program_id and college_id and remaining > 0:
+            # Dynamically build placeholders for exclusion list
+            exclude_placeholders = ",".join(["%s"] * len(exclude_ids))
+            exclude_clause = f"AND tc.tc_id NOT IN ({exclude_placeholders})" if exclude_ids else ""
+
             q1 = f"""
                 SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
                        tc.academic_year, tc.project_type, COUNT(sr.read_id) AS read_count
@@ -175,7 +133,7 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
                 INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
                 LEFT JOIN student_reads sr ON sr.tc_id = tc.tc_id
                 WHERE tc.program_id = %s AND tc.colleges_id = %s
-                {("AND tc.tc_id NOT IN (" + ",".join(["%s"]*len(exclude_ids)) + ")") if exclude_ids else ""}
+                {exclude_clause}
                 GROUP BY tc.tc_id
                 ORDER BY read_count DESC, tc.tc_id DESC
                 LIMIT %s
@@ -187,14 +145,16 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
 
         # Fallback 2: most read overall (Approved only)
         if remaining > 0:
+            # Collect all IDs already recommended (CF + Fallback 1)
             ex_ids = exclude_ids[:]
             for f in frames:
                 if not f.empty:
+                    # Use unique list in case of overlap
                     ex_ids += f["tc_id"].tolist()
+            ex_ids = list(set(ex_ids)) 
 
-            where_clause = ""
-            if ex_ids:
-                where_clause = "WHERE tc.tc_id NOT IN (" + ",".join(["%s"] * len(ex_ids)) + ")"
+            exclude_placeholders = ",".join(["%s"] * len(ex_ids))
+            where_clause = f"WHERE tc.tc_id NOT IN ({exclude_placeholders})" if ex_ids else ""
 
             q2 = f"""
                 SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.colleges_id, tc.program_id,
@@ -212,14 +172,14 @@ def fallback_recos(program_id=None, college_id=None, exclude_ids=None, limit=4):
             frames.append(df2)
 
         if frames:
-            return pd.concat(frames, ignore_index=True)
+            return pd.concat(frames, ignore_index=True).drop_duplicates(subset=['tc_id'])
         return pd.DataFrame()
     finally:
         conn.close()
 
 
 def compute_recommendations(student_arg):
-    # 1) Resolve to internal student_id (pwede student_number or student_id sa URL)
+    # 1) Resolve to internal student_id 
     student_id = resolve_student_id(student_arg)
 
     # Kung hindi ma-resolve → global popular lang (Approved)
@@ -229,79 +189,142 @@ def compute_recommendations(student_arg):
 
     conn = get_conn()
     try:
-        # 2) Kunin program_id at colleges_id ng student
+        # Get all read history for CF matrix creation
+        reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
+
+        # Get program/college for targeted fallback
         prog_col_df = pd.read_sql(
             "SELECT program_id, colleges_id FROM student_information WHERE student_id = %s LIMIT 1",
             conn,
-            params=[student_id],
+            params=[student_id]
         )
 
+        # Helper to safely convert to integer
         def safe_to_int(v):
             try:
-                if pd.isna(v):
-                    return None
+                if pd.isna(v): return None
+            except Exception: pass
+            try: return int(v)
             except Exception:
-                pass
-            try:
-                return int(v)
-            except Exception:
-                try:
-                    return int(float(str(v)))
-                except Exception:
-                    return None
+                try: return int(float(str(v)))
+                except Exception: return None
 
-        if not prog_col_df.empty:
-            program_id = safe_to_int(prog_col_df.iloc[0].get("program_id"))
-            college_id = safe_to_int(prog_col_df.iloc[0].get("colleges_id"))
-        else:
-            program_id = None
-            college_id = None
-
-        # 3) Kunin lahat ng nabasa na ng student → para ma-exclude sa recommendations
-        reads_df = pd.read_sql(
+        program_id = safe_to_int(prog_col_df.iloc[0].get("program_id")) if not prog_col_df.empty else None
+        college_id = safe_to_int(prog_col_df.iloc[0].get("colleges_id")) if not prog_col_df.empty else None
+        
+        # Identify items current user has already read (for exclusion later)
+        current_items_df = pd.read_sql(
             "SELECT tc_id FROM student_reads WHERE student_id = %s",
             conn,
             params=[student_id],
         )
+        current_items = set()
+        if not current_items_df.empty:
+            current_items_df["tc_id"] = pd.to_numeric(current_items_df["tc_id"], errors="coerce")
+            current_items = set(current_items_df.dropna(subset=["tc_id"])["tc_id"].astype(int))
 
-        exclude_ids = []
-        if not reads_df.empty:
-            reads_df["tc_id"] = pd.to_numeric(reads_df["tc_id"], errors="coerce")
-            reads_df = reads_df.dropna(subset=["tc_id"])
-            exclude_ids = reads_df["tc_id"].astype(int).tolist()
+        # --- CF Calculation Attempt ---
+        recommend_df = pd.DataFrame()
+        
+        # If no reads at all or current student is not in the reads_df, skip CF
+        if reads_df.empty or student_id not in reads_df['student_id'].astype(int).unique():
+            # Go straight to fallback based on student's program/college
+            rec_df = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
+            rec_df = drop_header_like_rows(rec_df)
+            return rec_df.to_dict(orient="records")
 
+        # Build user-item matrix
+        user_item = pd.crosstab(reads_df["student_id"].astype(int), reads_df["tc_id"].astype(int))
+        user_item.index = user_item.index.astype(int)
+        user_item.columns = user_item.columns.astype(int)
+
+        # Recalculate if user is still missing after crosstab (edge case handling)
+        if int(student_id) not in user_item.index:
+            rec_df = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
+            rec_df = drop_header_like_rows(rec_df)
+            return rec_df.to_dict(orient="records")
+
+        # Calculate user-user Cosine similarity
+        sim = cosine_similarity(user_item.values)
+        sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
+
+        # Find top 5 similar students (excluding self)
+        similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
+        candidate_ids = []
+
+        if similar_students:
+            similar_reads = reads_df[reads_df["student_id"].isin(similar_students)]
+            
+            # Count how many similar students read each thesis (for ranking)
+            candidate_counts = (
+                similar_reads.groupby("tc_id")["student_id"]
+                .nunique() 
+                .sort_values(ascending=False)
+            )
+            
+            # Select candidates that the current user hasn't read
+            candidate_ids = [
+                int(tc) for tc in candidate_counts.index
+                if tc not in current_items
+            ]
+
+        if candidate_ids:
+            # Fetch details only for APPROVED theses from the candidates
+            placeholders = ",".join(["%s"] * len(candidate_ids))
+            recommend_query = f"""
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo,
+                       tc.colleges_id, tc.program_id, tc.academic_year, tc.project_type
+                FROM thesis_capstone tc
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                WHERE tc.tc_id IN ({placeholders})
+            """
+            recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
+
+            if not recommend_df.empty:
+                # Map the CF ranking back to the DataFrame and sort
+                recommend_df["tc_id"] = recommend_df["tc_id"].astype(int)
+                rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
+                recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
+                recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])
+                recommend_df = recommend_df.head(4)
+
+        # --- Fallback to fill up to 4 recommendations ---
+        if len(recommend_df) < 4:
+            remaining = 4 - len(recommend_df)
+            
+            # Exclude current CF results AND items user has already read
+            exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
+            exclude_ids = list(set(exclude_ids + list(current_items))) # Combine CF results and user history
+
+            # Call fallback_recos (which internally does targeted and global popular)
+            fb = fallback_recos(
+                program_id=program_id, # Attempt targeted fallback first
+                college_id=college_id,
+                exclude_ids=exclude_ids,
+                limit=remaining
+            )
+            if not fb.empty:
+                recommend_df = pd.concat([recommend_df, fb], ignore_index=True)
+                # Ensure we only return max of 4 total recommendations
+                recommend_df = recommend_df.head(4) 
+
+
+        # FINAL SAFETY: alisin lahat ng mukhang header rows
+        recommend_df = drop_header_like_rows(recommend_df)
+
+        # Final output format
+        return recommend_df.to_dict(orient="records")
     finally:
         conn.close()
-
-    # 4) Main recommendations: most read sa same program & college (Approved only),
-    #    excluding already-read tc_ids
-    rec_df = fallback_recos(
-        program_id=program_id,
-        college_id=college_id,
-        exclude_ids=exclude_ids,
-        limit=4,
-    )
-
-    # 5) Kung kulang pa rin sa 4 → fill with global popular (Approved only)
-    if rec_df.empty or len(rec_df) < 4:
-        remaining = 4 - len(rec_df)
-        extra_exclude = rec_df["tc_id"].tolist() if not rec_df.empty else []
-        extra_exclude = list(set(extra_exclude + exclude_ids))
-        fb = fallback_recos(
-            exclude_ids=extra_exclude,
-            limit=remaining,
-        )
-        if not fb.empty:
-            rec_df = pd.concat([rec_df, fb], ignore_index=True)
-
-    # FINAL SAFETY: alisin lahat ng mukhang header rows
-    rec_df = drop_header_like_rows(rec_df)
-
-    return rec_df.to_dict(orient="records")
 
 
 @app.route("/recommend")
 def recommend():
+    """
+    Endpoint to retrieve thesis recommendations based on Collaborative Filtering (CF)
+    or popular fallbacks for a given student.
+    Usage: /recommend?student_id=3 or /recommend?student_number=22-00677
+    """
     # primary: student_number, fallback: student_id or generic 'student'
     student_arg = (
         request.args.get("student_number", "").strip()
@@ -310,15 +333,16 @@ def recommend():
     )
 
     if not student_arg:
-        return jsonify([])
+        # Global fallback if no argument is provided
+        fb = fallback_recos(limit=4)
+        return jsonify(fb.to_dict(orient="records"))
 
     recs = compute_recommendations(student_arg)
     return jsonify(recs)
 
 
-
 # ============================================================
-#  SEARCH PART → /search endpoint
+#  SEARCH PART → /search endpoint
 # ============================================================
 @app.route('/search', methods=['POST'])
 def search():
@@ -327,18 +351,22 @@ def search():
     if not query:
         return jsonify([])
 
+    if vectorizer is None:
+        # Error handling if model wasn't loaded
+        return jsonify({"error": "Search model not loaded on the server."}), 500
+
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
+            # Query all approved theses with authors and college/program details
             cursor.execute("""
-                SELECT tc.title, tc.authorone, tc.authortwo, tc.authorthree,
+                SELECT tc.tc_id, tc.title, tc.authorone, tc.authortwo, tc.authorthree,
                        tc.colleges_id, p.program, c.colleges AS college
                 FROM thesis_capstone tc
-                JOIN thesis_submission ts USING(tc_id)
-                JOIN student_information si USING(student_id)
-                JOIN program p USING(program_id)
-                JOIN colleges c ON si.colleges_id = c.colleges_id
-                WHERE ts.status = 'Approved'
+                INNER JOIN thesis_submission ts ON ts.tc_id = tc.tc_id AND ts.status = 'Approved'
+                LEFT JOIN student_information si ON tc.student_id = si.student_id 
+                LEFT JOIN program p ON tc.program_id = p.program_id
+                LEFT JOIN colleges c ON tc.colleges_id = c.colleges_id
             """)
             rows = cursor.fetchall()
     finally:
@@ -348,26 +376,26 @@ def search():
     if df.empty:
         return jsonify([])
 
+    # Combine relevant columns for vectorization
     df['text'] = df[['title', 'authorone', 'authortwo', 'authorthree']].fillna('').agg(' '.join, axis=1)
 
+    # Calculate similarity
     corpus_vec = vectorizer.transform(df['text'])
     q_vec = vectorizer.transform([query])
     scores = (corpus_vec @ q_vec.T).toarray().flatten()
 
     df['score'] = scores
+    # Take the top 5 results based on similarity score
     top = df.nlargest(5, 'score')
-    results = top[['title', 'college', 'program']].to_dict(orient='records')
+    
+    # Format results
+    results = top[['tc_id', 'title', 'college', 'program', 'score']].to_dict(orient='records')
     return jsonify(results)
 
 # ============================================================
-#  ENTRYPOINT
+#  ENTRYPOINT
 # ============================================================
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
 
     app.run(host="0.0.0.0", port=8000, debug=True)
-
-
-
-
-

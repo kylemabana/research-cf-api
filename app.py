@@ -126,8 +126,27 @@ def compute_recommendations(student_arg):
             conn,
             params=[student_id]
         )
-        program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
-        college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
+        
+        program_id = None
+        college_id = None
+        
+        if not prog_col_df.empty:
+            raw_prog = prog_col_df.iloc[0]["program_id"]
+            raw_coll = prog_col_df.iloc[0]["colleges_id"]
+        
+            # program_id
+            try:
+                if pd.notna(raw_prog):
+                    program_id = int(raw_prog)
+            except (ValueError, TypeError):
+                program_id = None  # kung may maling value (e.g. 'program_id')
+        
+            # colleges_id
+            try:
+                if pd.notna(raw_coll):
+                    college_id = int(raw_coll)
+            except (ValueError, TypeError):
+                college_id = None
 
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
@@ -287,4 +306,5 @@ def db_test():
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 

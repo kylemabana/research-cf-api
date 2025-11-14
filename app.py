@@ -126,25 +126,43 @@ def compute_recommendations(student_arg):
             conn,
             params=[student_id]
         )
-        program_id = int(prog_col_df.iloc[0]["program_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["program_id"]) else None
-        college_id = int(prog_col_df.iloc[0]["colleges_id"]) if not prog_col_df.empty and pd.notna(prog_col_df.iloc[0]["colleges_id"]) else None
+
+        def safe_to_int(v):
+            try:
+                if pd.isna(v):
+                    return None
+            except Exception:
+                pass
+            try:
+                # handle numeric strings, floats stored as strings, etc.
+                return int(v)
+            except Exception:
+                try:
+                    return int(float(str(v)))
+                except Exception:
+                    return None
+
+        if not prog_col_df.empty:
+            program_id = safe_to_int(prog_col_df.iloc[0].get("program_id"))
+            college_id = safe_to_int(prog_col_df.iloc[0].get("colleges_id"))
+        else:
+            program_id = None
+            college_id = None
 
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        user_item = reads_df.pivot_table(
-            index="student_id",
-            columns="tc_id",
-            aggfunc=lambda x: 1,
-            fill_value=0
-        )
+        # build binary user-item matrix
+        user_item = pd.crosstab(reads_df["student_id"].astype(int), reads_df["tc_id"].astype(int))
+        user_item.index = user_item.index.astype(int)
+        user_item.columns = user_item.columns.astype(int)
 
-        if student_id not in user_item.index:
+        if int(student_id) not in user_item.index:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        sim = cosine_similarity(user_item)
+        sim = cosine_similarity(user_item.values)
         sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
         similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
@@ -176,6 +194,7 @@ def compute_recommendations(student_arg):
             """
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
             if not recommend_df.empty:
+                recommend_df["tc_id"] = recommend_df["tc_id"].astype(int)
                 rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
                 recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
                 recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])

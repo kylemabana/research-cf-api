@@ -191,6 +191,14 @@ def compute_recommendations(student_arg):
     try:
         # Get all read history for CF matrix creation
         reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
+        
+        # --- FIX: Clean and ensure numeric columns before building the CF matrix ---
+        reads_df = drop_header_like_rows(reads_df)
+        
+        # Convert columns to numeric, coercing errors to NaN, then drop NaNs
+        reads_df["student_id"] = pd.to_numeric(reads_df["student_id"], errors="coerce")
+        reads_df["tc_id"] = pd.to_numeric(reads_df["tc_id"], errors="coerce")
+        reads_df = reads_df.dropna(subset=["student_id", "tc_id"]).astype({'student_id': int, 'tc_id': int})
 
         # Get program/college for targeted fallback
         prog_col_df = pd.read_sql(
@@ -213,28 +221,21 @@ def compute_recommendations(student_arg):
         college_id = safe_to_int(prog_col_df.iloc[0].get("colleges_id")) if not prog_col_df.empty else None
         
         # Identify items current user has already read (for exclusion later)
-        current_items_df = pd.read_sql(
-            "SELECT tc_id FROM student_reads WHERE student_id = %s",
-            conn,
-            params=[student_id],
-        )
-        current_items = set()
-        if not current_items_df.empty:
-            current_items_df["tc_id"] = pd.to_numeric(current_items_df["tc_id"], errors="coerce")
-            current_items = set(current_items_df.dropna(subset=["tc_id"])["tc_id"].astype(int))
+        # Using the cleaned reads_df now
+        current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
 
         # --- CF Calculation Attempt ---
         recommend_df = pd.DataFrame()
         
         # If no reads at all or current student is not in the reads_df, skip CF
-        if reads_df.empty or student_id not in reads_df['student_id'].astype(int).unique():
+        if reads_df.empty or student_id not in reads_df['student_id'].unique():
             # Go straight to fallback based on student's program/college
             rec_df = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             rec_df = drop_header_like_rows(rec_df)
             return rec_df.to_dict(orient="records")
 
         # Build user-item matrix
-        user_item = pd.crosstab(reads_df["student_id"].astype(int), reads_df["tc_id"].astype(int))
+        user_item = pd.crosstab(reads_df["student_id"], reads_df["tc_id"])
         user_item.index = user_item.index.astype(int)
         user_item.columns = user_item.columns.astype(int)
 

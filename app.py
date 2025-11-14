@@ -121,6 +121,18 @@ def compute_recommendations(student_arg):
     conn = get_conn()
     try:
         reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
+        # Coerce to numeric and drop invalid rows to guard against malformed data
+        # (e.g. a header row like 'student_id' inserted as data during import).
+        if not reads_df.empty:
+            reads_df['student_id'] = pd.to_numeric(reads_df['student_id'], errors='coerce')
+            reads_df['tc_id'] = pd.to_numeric(reads_df['tc_id'], errors='coerce')
+            reads_df = reads_df.dropna(subset=['student_id', 'tc_id'])
+            if reads_df.empty:
+                # no valid reads after cleaning
+                fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
+                return fb.to_dict(orient="records")
+            reads_df['student_id'] = reads_df['student_id'].astype(int)
+            reads_df['tc_id'] = reads_df['tc_id'].astype(int)
         prog_col_df = pd.read_sql(
             "SELECT program_id, colleges_id FROM student_information WHERE student_id = %s LIMIT 1",
             conn,

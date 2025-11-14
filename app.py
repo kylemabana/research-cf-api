@@ -120,19 +120,7 @@ def compute_recommendations(student_arg):
 
     conn = get_conn()
     try:
-        reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
-        # Coerce to numeric and drop invalid rows to guard against malformed data
-        # (e.g. a header row like 'student_id' inserted as data during import).
-        if not reads_df.empty:
-            reads_df['student_id'] = pd.to_numeric(reads_df['student_id'], errors='coerce')
-            reads_df['tc_id'] = pd.to_numeric(reads_df['tc_id'], errors='coerce')
-            reads_df = reads_df.dropna(subset=['student_id', 'tc_id'])
-            if reads_df.empty:
-                # no valid reads after cleaning
-                fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
-                return fb.to_dict(orient="records")
-            reads_df['student_id'] = reads_df['student_id'].astype(int)
-            reads_df['tc_id'] = reads_df['tc_id'].astype(int)
+        # 1) Get the student's program/college FIRST so they're always defined
         prog_col_df = pd.read_sql(
             "SELECT program_id, colleges_id FROM student_information WHERE student_id = %s LIMIT 1",
             conn,
@@ -146,7 +134,6 @@ def compute_recommendations(student_arg):
             except Exception:
                 pass
             try:
-                # handle numeric strings, floats stored as strings, etc.
                 return int(v)
             except Exception:
                 try:
@@ -161,12 +148,29 @@ def compute_recommendations(student_arg):
             program_id = None
             college_id = None
 
+        # 2) Load reads and clean them
+        reads_df = pd.read_sql("SELECT student_id, tc_id FROM student_reads", conn)
+
+        if not reads_df.empty:
+            reads_df["student_id"] = pd.to_numeric(reads_df["student_id"], errors="coerce")
+            reads_df["tc_id"] = pd.to_numeric(reads_df["tc_id"], errors="coerce")
+            reads_df = reads_df.dropna(subset=["student_id", "tc_id"])
+
+            if reads_df.empty:
+                # no valid reads after cleaning
+                fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
+                return fb.to_dict(orient="records")
+
+            reads_df["student_id"] = reads_df["student_id"].astype(int)
+            reads_df["tc_id"] = reads_df["tc_id"].astype(int)
+
+        # 3) If still empty (no reads at all) → fallback
         if reads_df.empty:
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
-        # build binary user-item matrix
-        user_item = pd.crosstab(reads_df["student_id"].astype(int), reads_df["tc_id"].astype(int))
+        # 4) Build user-item matrix
+        user_item = pd.crosstab(reads_df["student_id"], reads_df["tc_id"])
         user_item.index = user_item.index.astype(int)
         user_item.columns = user_item.columns.astype(int)
 
@@ -174,10 +178,17 @@ def compute_recommendations(student_arg):
             fb = fallback_recos(program_id=program_id, college_id=college_id, limit=4)
             return fb.to_dict(orient="records")
 
+        # 5) Collaborative filtering
         sim = cosine_similarity(user_item.values)
         sim_df = pd.DataFrame(sim, index=user_item.index, columns=user_item.index)
 
-        similar_students = sim_df[student_id].sort_values(ascending=False).iloc[1:6].index.tolist()
+        similar_students = (
+            sim_df[student_id]
+            .sort_values(ascending=False)
+            .iloc[1:6]
+            .index
+            .tolist()
+        )
 
         current_items = set(reads_df[reads_df["student_id"] == student_id]["tc_id"])
         recommend_df = pd.DataFrame()
@@ -205,13 +216,18 @@ def compute_recommendations(student_arg):
                 WHERE tc.tc_id IN ({placeholders})
             """
             recommend_df = pd.read_sql(recommend_query, conn, params=candidate_ids)
+
             if not recommend_df.empty:
                 recommend_df["tc_id"] = recommend_df["tc_id"].astype(int)
                 rank_map = {tc_id: rank for rank, tc_id in enumerate(candidate_ids)}
                 recommend_df["cf_rank"] = recommend_df["tc_id"].map(rank_map).fillna(10_000)
-                recommend_df = recommend_df.sort_values(["cf_rank", "tc_id"]).drop(columns=["cf_rank"])
-                recommend_df = recommend_df.head(4)
+                recommend_df = (
+                    recommend_df.sort_values(["cf_rank", "tc_id"])
+                    .drop(columns=["cf_rank"])
+                    .head(4)
+                )
 
+        # 6) If CF results are fewer than 4 → fill with fallback
         if len(recommend_df) < 4:
             remaining = 4 - len(recommend_df)
             exclude_ids = recommend_df["tc_id"].tolist() if not recommend_df.empty else []
@@ -219,12 +235,13 @@ def compute_recommendations(student_arg):
                 program_id=program_id,
                 college_id=college_id,
                 exclude_ids=exclude_ids,
-                limit=remaining
+                limit=remaining,
             )
             if not fb.empty:
                 recommend_df = pd.concat([recommend_df, fb], ignore_index=True)
 
         return recommend_df.to_dict(orient="records")
+
     finally:
         conn.close()
 

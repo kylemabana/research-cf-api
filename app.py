@@ -13,9 +13,19 @@ def get_db():
     )
 
 @app.get("/recommend")
+print(f"[DEBUG] recommend called with student_id={student_id}")
+
+cursor.execute(
+    "SELECT COUNT(*) AS cnt FROM student_reads WHERE student_id = %s",
+    (student_id,)
+)
+cnt = cursor.fetchone()["cnt"]
+print(f"[DEBUG] student_reads rows for {student_id}: {cnt}")
+
 def recommend(student_id: int) -> List[Dict]:
     conn = get_db()
     cursor = conn.cursor(dictionary=True)
+    
 
     # 1) Get student's program + college
     cursor.execute("""
@@ -84,3 +94,4 @@ def get_trending(cursor):
         LIMIT 12
     """)
     return cursor.fetchall()
+

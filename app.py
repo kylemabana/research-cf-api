@@ -324,6 +324,30 @@ def search():
     return jsonify(top[['title', 'college', 'program']].to_dict(orient='records'))
 
 
+    @app.route("/db-test")
+    def db_test():
+        try:
+            conn = get_conn()
+            try:
+                df_info = pd.read_sql("SELECT COUNT(*) AS cnt FROM student_information", conn)
+                df_thesis = pd.read_sql("SELECT COUNT(*) AS cnt FROM thesis_capstone", conn)
+                df_reads = pd.read_sql("SELECT COUNT(*) AS cnt FROM student_reads", conn)
+
+                return jsonify({
+                    "ok": True,
+                    "student_information_rows": int(df_info.iloc[0]["cnt"]),
+                    "thesis_capstone_rows": int(df_thesis.iloc[0]["cnt"]),
+                    "student_reads_rows": int(df_reads.iloc[0]["cnt"])
+                })
+            finally:
+                conn.close()
+        except Exception as e:
+            # Kung may problema sa koneksyon / query, ipakita natin yung error
+            return jsonify({
+                "ok": False,
+                "error": str(e)
+            }), 500
+
 # ============================================================
 #  ENTRYPOINT
 # ============================================================

@@ -247,9 +247,44 @@ def search():
     results = top[['title', 'college', 'program']].to_dict(orient='records')
     return jsonify(results)
 
+@app.route("/")
+def root():
+    return "CF API is running on Render."
+
+@app.route("/db-test")
+def db_test():
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT COUNT(*) AS n FROM student_information")
+                info = cursor.fetchone()
+
+                cursor.execute("SELECT COUNT(*) AS n FROM thesis_capstone")
+                thesis = cursor.fetchone()
+
+                cursor.execute("SELECT COUNT(*) AS n FROM student_reads")
+                reads = cursor.fetchone()
+
+            return jsonify({
+                "ok": True,
+                "student_information_rows": info["n"],
+                "thesis_capstone_rows": thesis["n"],
+                "student_reads_rows": reads["n"]
+            })
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
 # ============================================================
 #  ENTRYPOINT
 # ============================================================
 if __name__ == '__main__':
     # When deploying on a platform, you might not want debug=True
     app.run(host="0.0.0.0", port=8000, debug=True)
+

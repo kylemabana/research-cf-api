@@ -11,4 +11,6 @@ numpy
 opencv-python
 PyPDF2
 pdfminer.six
+fastapi
+uvicorn[standard]
 
